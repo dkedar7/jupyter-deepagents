@@ -159,7 +159,7 @@ const ChatComponent: React.FC = () => {
     <div className="deepagents-chat-container">
       {/* Header */}
       <div className="deepagents-chat-header">
-        <h2 className="deepagents-chat-title">Agent</h2>
+        <h2 className="deepagents-chat-title">Deep Agents</h2>
         <div className="deepagents-chat-controls">
           <span
             className={`deepagents-status-indicator deepagents-status-${agentStatus}`}

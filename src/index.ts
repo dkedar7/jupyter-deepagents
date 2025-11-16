@@ -37,14 +37,14 @@ const plugin: JupyterFrontEndPlugin<void> = {
 
     // Add command to open chat
     app.commands.addCommand(CommandIDs.openChat, {
-      label: 'Deep Agents Chat',
+      label: 'Deep Agents',
       caption: 'Open DeepAgents chat interface',
       icon: chatIcon,
       execute: () => {
         if (!widget || widget.isDisposed) {
           widget = new ChatWidget();
           widget.id = 'deepagents-chat';
-          widget.title.label = 'Deep Agents Chat';
+          widget.title.label = 'Deep Agents';
           widget.title.icon = chatIcon;
           widget.title.closable = true;
         }
