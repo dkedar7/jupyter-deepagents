@@ -1,8 +1,11 @@
 """
 HTTP request handlers for the DeepAgents extension.
 """
+import asyncio
 import json
-from typing import Optional
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional, Dict
 
 from jupyter_server.base.handlers import APIHandler
 from jupyter_server.utils import url_path_join
@@ -10,6 +13,13 @@ import tornado
 from tornado.web import HTTPError
 
 from .agent_wrapper import get_agent
+
+# Thread pool for running blocking agent operations
+_executor = ThreadPoolExecutor(max_workers=4)
+
+# Track active executions and their cancellation flags
+_active_executions: Dict[str, threading.Event] = {}
+_execution_lock = threading.Lock()
 
 
 class ChatHandler(APIHandler):
@@ -56,7 +66,57 @@ class ChatHandler(APIHandler):
             self.set_header("Cache-Control", "no-cache")
             self.set_header("Connection", "keep-alive")
 
-            for chunk in agent.stream(message, thread_id=thread_id, context=context):
+            # Run agent.stream() in thread pool to avoid blocking the event loop
+            queue = asyncio.Queue()
+            loop = asyncio.get_event_loop()
+
+            # Create cancellation event for this execution
+            cancel_event = threading.Event()
+            if thread_id:
+                with _execution_lock:
+                    _active_executions[thread_id] = cancel_event
+
+            def run_agent_stream():
+                """Run the blocking agent.stream() in a thread."""
+                try:
+                    for chunk in agent.stream(message, thread_id=thread_id, context=context):
+                        # Check if execution was cancelled
+                        if cancel_event.is_set():
+                            asyncio.run_coroutine_threadsafe(
+                                queue.put({"status": "cancelled", "message": "Execution cancelled by user"}),
+                                loop
+                            )
+                            asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+                            return
+
+                        # Send chunk to async handler via queue
+                        asyncio.run_coroutine_threadsafe(queue.put(chunk), loop)
+                    # Signal completion
+                    asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+                except Exception as e:
+                    # Send error to async handler
+                    asyncio.run_coroutine_threadsafe(queue.put(e), loop)
+                finally:
+                    # Clean up execution tracking
+                    if thread_id:
+                        with _execution_lock:
+                            _active_executions.pop(thread_id, None)
+
+            # Submit to thread pool
+            _executor.submit(run_agent_stream)
+
+            # Stream chunks from queue
+            while True:
+                chunk = await queue.get()
+
+                # Check for completion signal
+                if chunk is None:
+                    break
+
+                # Check for error
+                if isinstance(chunk, Exception):
+                    raise chunk
+
                 # Send as server-sent event
                 event_data = f"data: {json.dumps(chunk)}\n\n"
                 self.write(event_data)
@@ -118,7 +178,37 @@ class ResumeHandler(APIHandler):
             self.set_header("Cache-Control", "no-cache")
             self.set_header("Connection", "keep-alive")
 
-            for chunk in agent.resume_from_interrupt(decisions, thread_id=thread_id):
+            # Run agent.resume_from_interrupt() in thread pool to avoid blocking
+            queue = asyncio.Queue()
+            loop = asyncio.get_event_loop()
+
+            def run_agent_resume():
+                """Run the blocking agent.resume_from_interrupt() in a thread."""
+                try:
+                    for chunk in agent.resume_from_interrupt(decisions, thread_id=thread_id):
+                        # Send chunk to async handler via queue
+                        asyncio.run_coroutine_threadsafe(queue.put(chunk), loop)
+                    # Signal completion
+                    asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+                except Exception as e:
+                    # Send error to async handler
+                    asyncio.run_coroutine_threadsafe(queue.put(e), loop)
+
+            # Submit to thread pool
+            _executor.submit(run_agent_resume)
+
+            # Stream chunks from queue
+            while True:
+                chunk = await queue.get()
+
+                # Check for completion signal
+                if chunk is None:
+                    break
+
+                # Check for error
+                if isinstance(chunk, Exception):
+                    raise chunk
+
                 # Send as server-sent event
                 event_data = f"data: {json.dumps(chunk)}\n\n"
                 self.write(event_data)
