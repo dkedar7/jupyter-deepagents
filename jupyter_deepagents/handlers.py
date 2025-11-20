@@ -31,7 +31,6 @@ class ChatHandler(APIHandler):
             # Parse request body
             data = self.get_json_body()
             message = data.get("message")
-            use_stream = data.get("stream", False)
             thread_id = data.get("thread_id")
             current_directory = data.get("current_directory", "")
             focused_widget = data.get("focused_widget", "")
@@ -52,23 +51,18 @@ class ChatHandler(APIHandler):
                 "focused_widget": focused_widget
             }
 
-            if use_stream:
-                # Stream response
-                self.set_header("Content-Type", "text/event-stream")
-                self.set_header("Cache-Control", "no-cache")
-                self.set_header("Connection", "keep-alive")
+            # Stream response
+            self.set_header("Content-Type", "text/event-stream")
+            self.set_header("Cache-Control", "no-cache")
+            self.set_header("Connection", "keep-alive")
 
-                for chunk in agent.stream(message, thread_id=thread_id, context=context):
-                    # Send as server-sent event
-                    event_data = f"data: {json.dumps(chunk)}\n\n"
-                    self.write(event_data)
-                    await self.flush()
+            for chunk in agent.stream(message, thread_id=thread_id, context=context):
+                # Send as server-sent event
+                event_data = f"data: {json.dumps(chunk)}\n\n"
+                self.write(event_data)
+                await self.flush()
 
-                self.finish()
-            else:
-                # Regular invoke
-                result = agent.invoke(message, thread_id=thread_id, context=context)
-                self.finish(json.dumps(result))
+            self.finish()
 
         except HTTPError:
             raise

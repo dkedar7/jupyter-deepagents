@@ -15,6 +15,15 @@ interface ToolCall {
 }
 
 /**
+ * Todo item interface
+ */
+interface TodoItem {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  activeForm?: string;
+}
+
+/**
  * Action request interface for interrupts
  */
 interface ActionRequest {
@@ -59,6 +68,7 @@ interface Message {
   error?: boolean;
   intermediates?: string[];
   toolCalls?: ToolCall[];
+  todoList?: TodoItem[];
   interrupt?: InterruptData;
 }
 
@@ -88,9 +98,13 @@ const ChatComponent: React.FC<ChatComponentProps> = ({ shell, browserFactory }) 
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Check agent health on mount
+  // Lazy load agent - delay health check to avoid blocking JupyterLab startup
   useEffect(() => {
-    checkAgentHealth();
+    const timer = setTimeout(() => {
+      checkAgentHealth();
+    }, 2000); // Wait 2 seconds to let JupyterLab finish loading
+
+    return () => clearTimeout(timer);
   }, []);
 
   const checkAgentHealth = async () => {
@@ -181,6 +195,7 @@ const ChatComponent: React.FC<ChatComponentProps> = ({ shell, browserFactory }) 
     let intermediateMessages: string[] = [];
     let finalContent = '';
     let toolCalls: ToolCall[] = [];
+    let todoList: TodoItem[] = [];
 
     try {
       const xsrfToken = getXSRFToken();
@@ -230,6 +245,11 @@ const ChatComponent: React.FC<ChatComponentProps> = ({ shell, browserFactory }) 
                   });
                 }
 
+                // Handle todo list updates
+                if (data.todo_list) {
+                  todoList = data.todo_list;
+                }
+
                 // Handle regular content
                 if (data.chunk) {
                   intermediateMessages.push(data.chunk);
@@ -247,7 +267,8 @@ const ChatComponent: React.FC<ChatComponentProps> = ({ shell, browserFactory }) 
                             ...m,
                             content: finalContent,
                             intermediates: [...intermediateMessages],
-                            toolCalls: toolCalls.length > 0 ? [...toolCalls] : undefined
+                            toolCalls: toolCalls.length > 0 ? [...toolCalls] : undefined,
+                            todoList: todoList.length > 0 ? [...todoList] : undefined
                           }
                         : m
                     );
@@ -258,7 +279,8 @@ const ChatComponent: React.FC<ChatComponentProps> = ({ shell, browserFactory }) 
                       content: finalContent,
                       timestamp: new Date(),
                       intermediates: [...intermediateMessages],
-                      toolCalls: toolCalls.length > 0 ? [...toolCalls] : undefined
+                      toolCalls: toolCalls.length > 0 ? [...toolCalls] : undefined,
+                      todoList: todoList.length > 0 ? [...todoList] : undefined
                     }];
                   }
                 });
@@ -291,18 +313,19 @@ const ChatComponent: React.FC<ChatComponentProps> = ({ shell, browserFactory }) 
                 // Stream complete - keep intermediates visible
                 setMessages(prev => {
                   const existing = prev.find(m => m.id === assistantMessageId);
-                  if (!existing && (finalContent || toolCalls.length > 0)) {
-                    // Add message if it doesn't exist but we have content or tool calls
+                  if (!existing && (finalContent || toolCalls.length > 0 || todoList.length > 0)) {
+                    // Add message if it doesn't exist but we have content, tool calls, or todos
                     return [...prev, {
                       id: assistantMessageId,
                       role: 'assistant' as const,
                       content: finalContent,
                       timestamp: new Date(),
                       intermediates: intermediateMessages.length > 0 ? [...intermediateMessages] : undefined,
-                      toolCalls: toolCalls.length > 0 ? [...toolCalls] : undefined
+                      toolCalls: toolCalls.length > 0 ? [...toolCalls] : undefined,
+                      todoList: todoList.length > 0 ? [...todoList] : undefined
                     }];
                   }
-                  // If message exists, leave it as is (with intermediates and tool calls)
+                  // If message exists, leave it as is (with intermediates, tool calls, and todos)
                   return prev;
                 });
               } else if (data.status === 'error') {
@@ -378,6 +401,7 @@ const ChatComponent: React.FC<ChatComponentProps> = ({ shell, browserFactory }) 
       let intermediateMessages: string[] = [];
       let finalContent = '';
       let toolCalls: ToolCall[] = [];
+      let todoList: TodoItem[] = [];
 
       while (true) {
         const { done, value } = await reader.read();
@@ -399,6 +423,10 @@ const ChatComponent: React.FC<ChatComponentProps> = ({ shell, browserFactory }) 
                   });
                 }
 
+                if (data.todo_list) {
+                  todoList = data.todo_list;
+                }
+
                 if (data.chunk) {
                   intermediateMessages.push(data.chunk);
                   finalContent = data.chunk;
@@ -413,7 +441,8 @@ const ChatComponent: React.FC<ChatComponentProps> = ({ shell, browserFactory }) 
                             ...m,
                             content: finalContent,
                             intermediates: [...intermediateMessages],
-                            toolCalls: toolCalls.length > 0 ? [...toolCalls] : undefined
+                            toolCalls: toolCalls.length > 0 ? [...toolCalls] : undefined,
+                            todoList: todoList.length > 0 ? [...todoList] : undefined
                           }
                         : m
                     );
@@ -424,7 +453,8 @@ const ChatComponent: React.FC<ChatComponentProps> = ({ shell, browserFactory }) 
                       content: finalContent,
                       timestamp: new Date(),
                       intermediates: [...intermediateMessages],
-                      toolCalls: toolCalls.length > 0 ? [...toolCalls] : undefined
+                      toolCalls: toolCalls.length > 0 ? [...toolCalls] : undefined,
+                      todoList: todoList.length > 0 ? [...todoList] : undefined
                     }];
                   }
                 });
@@ -596,6 +626,18 @@ const ChatComponent: React.FC<ChatComponentProps> = ({ shell, browserFactory }) 
                           {formatToolArgs(toolCall.args)}
                         </div>
                       </details>
+                    ))}
+                  </div>
+                )}
+                {message.todoList && message.todoList.length > 0 && (
+                  <div className="deepagents-todo-list">
+                    {message.todoList.map((todo, idx) => (
+                      <div key={idx} className={`deepagents-todo-item deepagents-todo-${todo.status}`}>
+                        <span className="deepagents-todo-marker">
+                          {todo.status === 'completed' ? '✓' : todo.status === 'in_progress' ? '→' : '○'}
+                        </span>
+                        <span className="deepagents-todo-content">{todo.content}</span>
+                      </div>
                     ))}
                   </div>
                 )}

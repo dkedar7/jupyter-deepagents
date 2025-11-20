@@ -140,88 +140,6 @@ class AgentWrapper:
             return f"{message}\n\n" + "\n".join(context_parts)
         return message
 
-    def invoke(self, message: str, config: Optional[Dict[str, Any]] = None, thread_id: Optional[str] = None, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        Invoke the agent with a message.
-
-        Args:
-            message: The user message to send to the agent
-            config: Optional configuration for the agent
-            thread_id: Optional thread ID for conversation history
-
-        Returns:
-            Dict containing the agent's response
-        """
-        if self.agent is None:
-            error_msg = "Agent not loaded. "
-            if os.environ.get('JUPYTER_AGENT_PATH'):
-                error_msg += f"Check JUPYTER_AGENT_PATH: {os.environ.get('JUPYTER_AGENT_PATH')}"
-            else:
-                error_msg += "Please create my_agent.py with your LangGraph agent or set JUPYTER_AGENT_PATH."
-            return {
-                "error": error_msg,
-                "status": "error"
-            }
-
-        try:
-            # Append context to message
-            message_with_context = self._append_context_to_message(message, context)
-
-            # Prepare the input for the agent
-            # Adjust this based on your agent's expected input format
-            agent_input = {"messages": [{"role": "user", "content": message_with_context}]}
-
-            # Prepare config with thread_id if provided
-            agent_config = config or {}
-            if thread_id:
-                agent_config["configurable"] = agent_config.get("configurable", {})
-                agent_config["configurable"]["thread_id"] = thread_id
-
-            # Invoke the agent
-            result = self.agent.invoke(agent_input, config=agent_config)
-
-            # Extract the response
-            # Adjust this based on your agent's output format
-            response_text = ""
-
-            if isinstance(result, dict):
-                if "messages" in result and len(result["messages"]) > 0:
-                    last_message = result["messages"][-1]
-
-                    # Handle LangChain message objects (AIMessage, HumanMessage, etc.)
-                    if hasattr(last_message, 'content'):
-                        content = last_message.content
-                        # Convert content to string if it's not already
-                        if isinstance(content, str):
-                            response_text = content
-                        elif isinstance(content, list):
-                            # Handle list of content blocks
-                            response_text = " ".join(
-                                block.get("text", str(block)) if isinstance(block, dict) else str(block)
-                                for block in content
-                            )
-                        else:
-                            response_text = str(content)
-                    elif isinstance(last_message, dict):
-                        response_text = last_message.get("content", str(last_message))
-                    else:
-                        response_text = str(last_message)
-                else:
-                    response_text = str(result)
-            else:
-                response_text = str(result)
-
-            return {
-                "response": response_text,
-                "status": "success"
-            }
-
-        except Exception as e:
-            return {
-                "error": f"Error invoking agent: {str(e)}",
-                "status": "error"
-            }
-
     def resume_from_interrupt(self, decisions: list, config: Optional[Dict[str, Any]] = None, thread_id: Optional[str] = None) -> Iterator[Dict[str, Any]]:
         """
         Resume execution after a human-in-the-loop interrupt.
@@ -330,6 +248,84 @@ class AgentWrapper:
                                 message_type = last_message.__class__.__name__ if hasattr(last_message, '__class__') else None
 
                                 if message_type == 'ToolMessage':
+                                    # Special handling for think_tool - show reflection as regular content
+                                    if hasattr(last_message, 'name') and last_message.name == 'think_tool':
+                                        # Extract reflection from tool message content
+                                        tool_content = last_message.content
+                                        reflection = None
+
+                                        if isinstance(tool_content, str):
+                                            # Try to parse as JSON
+                                            try:
+                                                import json
+                                                parsed = json.loads(tool_content)
+                                                reflection = parsed.get('reflection')
+                                            except:
+                                                reflection = tool_content
+                                        elif isinstance(tool_content, dict):
+                                            reflection = tool_content.get('reflection')
+
+                                        if reflection:
+                                            yield {
+                                                "chunk": reflection,
+                                                "status": "streaming"
+                                            }
+                                    # Special handling for write_todos - show as formatted list
+                                    elif hasattr(last_message, 'name') and last_message.name == 'write_todos':
+                                        tool_content = last_message.content
+                                        todos = None
+
+                                        # Try multiple parsing approaches
+                                        if isinstance(tool_content, str):
+                                            import json
+                                            import re
+                                            import ast
+
+                                            # Look for array pattern first (handles "Updated todo list to [...]" format)
+                                            match = re.search(r'\[.*\]', tool_content, re.DOTALL)
+                                            if match:
+                                                array_str = match.group(0)
+
+                                                # Try parsing as Python literal first (handles single quotes)
+                                                try:
+                                                    todos = ast.literal_eval(array_str)
+                                                except:
+                                                    # Fall back to JSON parsing (requires double quotes)
+                                                    try:
+                                                        todos = json.loads(array_str)
+                                                    except:
+                                                        pass
+                                            else:
+                                                # No array found, try parsing entire string as JSON
+                                                try:
+                                                    parsed = json.loads(tool_content)
+                                                    if isinstance(parsed, dict):
+                                                        todos = parsed.get('todos')
+                                                        # If todos is a string, parse it again
+                                                        if isinstance(todos, str):
+                                                            todos = json.loads(todos)
+                                                    elif isinstance(parsed, list):
+                                                        # Content is directly a list
+                                                        todos = parsed
+                                                except:
+                                                    pass
+                                        elif isinstance(tool_content, dict):
+                                            todos = tool_content.get('todos')
+                                            if isinstance(todos, str):
+                                                try:
+                                                    import json
+                                                    todos = json.loads(todos)
+                                                except:
+                                                    pass
+                                        elif isinstance(tool_content, list):
+                                            # Content is directly a list
+                                            todos = tool_content
+
+                                        if todos and isinstance(todos, list):
+                                            yield {
+                                                "todo_list": todos,
+                                                "status": "streaming"
+                                            }
                                     pass
                                 elif hasattr(last_message, 'content'):
                                     content = last_message.content
@@ -347,21 +343,27 @@ class AgentWrapper:
                                     if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
                                         tool_calls = []
                                         for tc in last_message.tool_calls:
+                                            # Skip think_tool and write_todos - shown as special content
+                                            tool_name = tc.get("name") if isinstance(tc, dict) else getattr(tc, 'name', None)
+                                            if tool_name in ['think_tool', 'write_todos']:
+                                                continue
+
                                             tool_calls.append({
                                                 "id": tc.get("id") if isinstance(tc, dict) else getattr(tc, 'id', None),
-                                                "name": tc.get("name") if isinstance(tc, dict) else getattr(tc, 'name', None),
+                                                "name": tool_name,
                                                 "args": tc.get("args") if isinstance(tc, dict) else getattr(tc, 'args', {})
                                             })
 
                                     content_str = content_str.strip() if content_str else ""
 
-                                    if content_str and tool_calls:
+                                    # Always filter tool call dictionaries, even if all tool_calls were filtered out
+                                    if content_str and hasattr(last_message, 'tool_calls') and last_message.tool_calls:
                                         import re
                                         tool_dict_pattern = r"\{'id':\s*'[^']+',\s*'input':\s*\{.*?\},\s*'name':\s*'[^']+',\s*'type':\s*'tool_use'\}"
                                         content_str = re.sub(tool_dict_pattern, '', content_str, flags=re.DOTALL)
                                         content_str = content_str.strip()
 
-                                    if tool_calls:
+                                    if tool_calls and len(tool_calls) > 0:
                                         yield {
                                             "tool_calls": tool_calls,
                                             "node": node_name,
@@ -507,10 +509,86 @@ class AgentWrapper:
                                 message_type = last_message.__class__.__name__ if hasattr(last_message, '__class__') else None
 
                                 # Handle ToolMessage (tool outputs)
-                                # Skip ToolMessage entirely - don't send to frontend
                                 if message_type == 'ToolMessage':
-                                    # Don't yield anything for ToolMessages
-                                    # They will not appear in the UI at all
+                                    # Special handling for think_tool - show reflection as regular content
+                                    if hasattr(last_message, 'name') and last_message.name == 'think_tool':
+                                        # Extract reflection from tool message content
+                                        tool_content = last_message.content
+                                        reflection = None
+
+                                        if isinstance(tool_content, str):
+                                            # Try to parse as JSON
+                                            try:
+                                                import json
+                                                parsed = json.loads(tool_content)
+                                                reflection = parsed.get('reflection')
+                                            except:
+                                                reflection = tool_content
+                                        elif isinstance(tool_content, dict):
+                                            reflection = tool_content.get('reflection')
+
+                                        if reflection:
+                                            yield {
+                                                "chunk": reflection,
+                                                "status": "streaming"
+                                            }
+                                    # Special handling for write_todos - show as formatted list
+                                    elif hasattr(last_message, 'name') and last_message.name == 'write_todos':
+                                        tool_content = last_message.content
+                                        todos = None
+
+                                        # Try multiple parsing approaches
+                                        if isinstance(tool_content, str):
+                                            import json
+                                            import re
+                                            import ast
+
+                                            # Look for array pattern first (handles "Updated todo list to [...]" format)
+                                            match = re.search(r'\[.*\]', tool_content, re.DOTALL)
+                                            if match:
+                                                array_str = match.group(0)
+
+                                                # Try parsing as Python literal first (handles single quotes)
+                                                try:
+                                                    todos = ast.literal_eval(array_str)
+                                                except:
+                                                    # Fall back to JSON parsing (requires double quotes)
+                                                    try:
+                                                        todos = json.loads(array_str)
+                                                    except:
+                                                        pass
+                                            else:
+                                                # No array found, try parsing entire string as JSON
+                                                try:
+                                                    parsed = json.loads(tool_content)
+                                                    if isinstance(parsed, dict):
+                                                        todos = parsed.get('todos')
+                                                        # If todos is a string, parse it again
+                                                        if isinstance(todos, str):
+                                                            todos = json.loads(todos)
+                                                    elif isinstance(parsed, list):
+                                                        # Content is directly a list
+                                                        todos = parsed
+                                                except:
+                                                    pass
+                                        elif isinstance(tool_content, dict):
+                                            todos = tool_content.get('todos')
+                                            if isinstance(todos, str):
+                                                try:
+                                                    import json
+                                                    todos = json.loads(todos)
+                                                except:
+                                                    pass
+                                        elif isinstance(tool_content, list):
+                                            # Content is directly a list
+                                            todos = tool_content
+
+                                        if todos and isinstance(todos, list):
+                                            yield {
+                                                "todo_list": todos,
+                                                "status": "streaming"
+                                            }
+                                    # Skip other ToolMessages - don't send to frontend
                                     pass
 
                                 # Handle regular messages (including AIMessage with tool calls)
@@ -534,9 +612,14 @@ class AgentWrapper:
                                     if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
                                         tool_calls = []
                                         for tc in last_message.tool_calls:
+                                            # Skip think_tool and write_todos - shown as special content
+                                            tool_name = tc.get("name") if isinstance(tc, dict) else getattr(tc, 'name', None)
+                                            if tool_name in ['think_tool', 'write_todos']:
+                                                continue
+
                                             tool_calls.append({
                                                 "id": tc.get("id") if isinstance(tc, dict) else getattr(tc, 'id', None),
-                                                "name": tc.get("name") if isinstance(tc, dict) else getattr(tc, 'name', None),
+                                                "name": tool_name,
                                                 "args": tc.get("args") if isinstance(tc, dict) else getattr(tc, 'args', {})
                                             })
 
@@ -545,7 +628,8 @@ class AgentWrapper:
 
                                     # Filter out tool call dictionaries from content
                                     # These often appear as strings like "{'id': '...', 'input': {...}, 'name': '...', 'type': 'tool_use'}"
-                                    if content_str and tool_calls:
+                                    # Always filter, even if we filtered out all tool_calls (e.g., write_todos, think_tool)
+                                    if content_str and hasattr(last_message, 'tool_calls') and last_message.tool_calls:
                                         # Remove lines that look like tool call dictionaries
                                         import re
                                         # Pattern to match tool call dictionary representations
@@ -554,7 +638,7 @@ class AgentWrapper:
                                         content_str = content_str.strip()
 
                                     # Yield tool calls (if any)
-                                    if tool_calls:
+                                    if tool_calls and len(tool_calls) > 0:
                                         yield {
                                             "tool_calls": tool_calls,
                                             "node": node_name,
