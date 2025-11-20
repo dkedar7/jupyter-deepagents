@@ -91,7 +91,7 @@ const ChatComponent: React.FC<ChatComponentProps> = ({ shell, browserFactory }) 
   const [threadId, setThreadId] = useState<string>(() => crypto.randomUUID());
   const [awaitingDecision, setAwaitingDecision] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -328,6 +328,9 @@ const ChatComponent: React.FC<ChatComponentProps> = ({ shell, browserFactory }) 
                   // If message exists, leave it as is (with intermediates, tool calls, and todos)
                   return prev;
                 });
+              } else if (data.status === 'cancelled') {
+                console.log('Execution cancelled');
+                addSystemMessage(data.message || 'Execution cancelled by user');
               } else if (data.status === 'error') {
                 console.error('Stream error:', data.error);
                 setMessages(prev => [...prev, {
@@ -484,6 +487,9 @@ const ChatComponent: React.FC<ChatComponentProps> = ({ shell, browserFactory }) 
                 });
               } else if (data.status === 'complete') {
                 console.log('Resume complete');
+              } else if (data.status === 'cancelled') {
+                console.log('Resume cancelled');
+                addSystemMessage(data.message || 'Execution cancelled by user');
               } else if (data.status === 'error') {
                 console.error('Resume error:', data.error);
                 setMessages(prev => [...prev, {
@@ -509,7 +515,7 @@ const ChatComponent: React.FC<ChatComponentProps> = ({ shell, browserFactory }) 
     }
   };
 
-  const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSendMessage();
@@ -529,6 +535,18 @@ const ChatComponent: React.FC<ChatComponentProps> = ({ shell, browserFactory }) 
       addSystemMessage('Failed to reload agent');
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const cancelExecution = async () => {
+    try {
+      await requestAPI<any>('cancel', {
+        method: 'POST',
+        body: JSON.stringify({ thread_id: threadId })
+      });
+      console.log('Cancellation requested for thread:', threadId);
+    } catch (error) {
+      console.error('Error cancelling execution:', error);
     }
   };
 
@@ -729,24 +747,34 @@ const ChatComponent: React.FC<ChatComponentProps> = ({ shell, browserFactory }) 
 
       {/* Input */}
       <div className="deepagents-chat-input-container">
-        <input
+        <textarea
           ref={inputRef}
-          type="text"
           className="deepagents-chat-input"
-          placeholder="Type your message..."
+          placeholder="Type your message... (Shift+Enter for new line)"
           value={inputValue}
           onChange={e => setInputValue(e.target.value)}
-          onKeyPress={handleKeyPress}
+          onKeyDown={handleKeyDown}
           disabled={isLoading}
+          rows={1}
         />
-        <button
-          className="deepagents-send-button"
-          onClick={handleSendMessage}
-          disabled={!inputValue.trim() || isLoading}
-          title="Send message"
-        >
-          ↑
-        </button>
+        {isLoading ? (
+          <button
+            className="deepagents-stop-button"
+            onClick={cancelExecution}
+            title="Stop execution"
+          >
+            ■
+          </button>
+        ) : (
+          <button
+            className="deepagents-send-button"
+            onClick={handleSendMessage}
+            disabled={!inputValue.trim()}
+            title="Send message"
+          >
+            ↑
+          </button>
+        )}
       </div>
     </div>
   );

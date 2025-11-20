@@ -182,10 +182,25 @@ class ResumeHandler(APIHandler):
             queue = asyncio.Queue()
             loop = asyncio.get_event_loop()
 
+            # Create cancellation event for this execution
+            cancel_event = threading.Event()
+            if thread_id:
+                with _execution_lock:
+                    _active_executions[thread_id] = cancel_event
+
             def run_agent_resume():
                 """Run the blocking agent.resume_from_interrupt() in a thread."""
                 try:
                     for chunk in agent.resume_from_interrupt(decisions, thread_id=thread_id):
+                        # Check if execution was cancelled
+                        if cancel_event.is_set():
+                            asyncio.run_coroutine_threadsafe(
+                                queue.put({"status": "cancelled", "message": "Execution cancelled by user"}),
+                                loop
+                            )
+                            asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+                            return
+
                         # Send chunk to async handler via queue
                         asyncio.run_coroutine_threadsafe(queue.put(chunk), loop)
                     # Signal completion
@@ -193,6 +208,11 @@ class ResumeHandler(APIHandler):
                 except Exception as e:
                     # Send error to async handler
                     asyncio.run_coroutine_threadsafe(queue.put(e), loop)
+                finally:
+                    # Clean up execution tracking
+                    if thread_id:
+                        with _execution_lock:
+                            _active_executions.pop(thread_id, None)
 
             # Submit to thread pool
             _executor.submit(run_agent_resume)
@@ -243,6 +263,48 @@ class HealthHandler(APIHandler):
             raise HTTPError(500, str(e))
 
 
+class CancelHandler(APIHandler):
+    """Handler to cancel ongoing agent execution."""
+
+    @tornado.web.authenticated
+    async def post(self):
+        """
+        Cancel an ongoing agent execution.
+
+        Expected JSON payload:
+        {
+            "thread_id": "uuid"
+        }
+        """
+        try:
+            data = self.get_json_body()
+            thread_id = data.get("thread_id")
+
+            if not thread_id:
+                raise HTTPError(400, "thread_id is required")
+
+            # Set the cancellation event for this thread
+            with _execution_lock:
+                cancel_event = _active_executions.get(thread_id)
+                if cancel_event:
+                    cancel_event.set()
+                    self.finish(json.dumps({
+                        "status": "success",
+                        "message": "Cancellation requested"
+                    }))
+                else:
+                    self.finish(json.dumps({
+                        "status": "not_found",
+                        "message": "No active execution found for this thread"
+                    }))
+
+        except HTTPError:
+            raise
+        except Exception as e:
+            self.log.error(f"Error in CancelHandler: {e}", exc_info=True)
+            raise HTTPError(500, str(e))
+
+
 def setup_handlers(web_app):
     """Setup the HTTP request handlers."""
     host_pattern = ".*$"
@@ -253,6 +315,7 @@ def setup_handlers(web_app):
     route_pattern_reload = url_path_join(base_url, "jupyter-deepagents", "reload")
     route_pattern_resume = url_path_join(base_url, "jupyter-deepagents", "resume")
     route_pattern_health = url_path_join(base_url, "jupyter-deepagents", "health")
+    route_pattern_cancel = url_path_join(base_url, "jupyter-deepagents", "cancel")
 
     # Add handlers
     handlers = [
@@ -260,6 +323,7 @@ def setup_handlers(web_app):
         (route_pattern_reload, ReloadAgentHandler),
         (route_pattern_resume, ResumeHandler),
         (route_pattern_health, HealthHandler),
+        (route_pattern_cancel, CancelHandler),
     ]
 
     web_app.add_handlers(host_pattern, handlers)
